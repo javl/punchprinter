@@ -1,7 +1,7 @@
 //==============================================================
 // Variables that might come in handy when testing
 //==============================================================
-// #define replaces keywords with values during compilation
+// #define replaces keywords with their values during compilation
 
 // Topping mode:
 // 1: do pigments, when done add topping
@@ -9,7 +9,7 @@
 // 3: do pigments and topping at the same time
 // 4: do only pigments, no topping
 #define TOPPING_MODE 1
-#define TOPPING_DELAY 1000.0 // used by TOPPING_MODE 2
+#define TOPPING_DELAY 1000.0 // only used by TOPPING_MODE 2
 
 // Convert the low color values (range 0-100) to useable run times for the pumps
 // milliseconds to run = color value * PIGMENT_PUMP_TIME_FACTOR
@@ -20,141 +20,176 @@
 #define TOPPING_PUMP_TOTAL_TIME 2000.0 // Don't forget the decimal!
 
 // The print button gets blocked for time (in milliseconds) to prevent printing double.
-#define BUTTON_BLOCK_TIME 1500.0
+#define BUTTON_BLOCK_PERIOD 1500.0
+
+// The potentiometer values are checked multiple times and an average of the measured
+// values is used to smooth the results. This sets the sample amount:
+#define POT_SAMPLE_AMOUNT 10
 
 //==============================================================
 // Setup the Arduino pins to use
 //==============================================================
 #define NUMBER_OF_GLASSES 10
 
-// Multiplexer pins
-#define INPUTPIN 5 // Input from multiplexer (Z)
+// Printer states:
+// 0: just plugged in, waiting for all switches to go LOW
+// 1: all switches are low, toggle 0 to 7 to run the pumps
+// 2: normal print mode!
+volatile int printer_state = 0;  // Volatile so it can be changed in interrupt
 
-#define SP0 2 // Select pin S0
-#define SP1 3 // Select pin S1
-#define SP2 4 // Select pin S2
-#define SP3 5 // Select pin S3
+int relay_pins[8] = { 2, 3, 4, 5, 6, 7, 8, 9 }; // Pins for the pump relays
+int switch_pins[10] = { 22, 24, 26, 28, 30, 32, 34, 36, 38, 40 }; // Switches
+int pot_pins[4] = { 0, 1, 2, 3 }; // Potentiometers
+int button_pin = 21; // Print button, 21 because it can use interrupts
 
-boolean cup_enabled[] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }; // Keep track of enabled cups
-int tubePins[] = { 6, 7, 8, 9, 10, 11, 12, 13 }; // Pins for the tube relays
-long timers[8]; // Timers to set the amount of fluid
-int current_cup_index = 0;  // The next cup to pour
+int pot_readings[4][POT_SAMPLE_AMOUNT]; // the readings from the pots
+int pot_index = 0; // the index of the current potreading
+int pot_total[4] = {0, 0, 0, 0}; // the running total for the pots
+int pot_average[4] = {0, 0, 0, 0}; // Holds the final averaged pot values, used for colors
+
+boolean switch_states[] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }; // Keep track of switch positions
+
+long timers[8]; // Timers keep track of time pumps run
+
+int cup_index = 0;  // The next cup to pour
 boolean can_dispend = true; // Whether pressing the button will dispend anything
-long button_blocked_timer = 0; // Unblock button at
+long button_block_timer = 0; // COunts back to zero when button is blocked after pressing
+
 float generated_colors[10][4]; // Holds the generated colors in 2D matrix ([cup][color])
-
-// Add some hardcoded colors for testing
-generated_colors[0][0] = 45.0;
-generated_colors[0][1] = 45.0;
-generated_colors[0][2] = 45.0;
-generated_colors[0][3] = 45.0;
-
-generated_colors[7][0] = 0.0;
-generated_colors[7][1] = 11.0;
-generated_colors[7][2] = 91.0;
-generated_colors[7][3] = 10.0;
 
 //==============================================================
 // Setup
 //==============================================================
 void setup(){
-  Serial.begin(115200);
+  // Add some hardcoded colors for testing
+  generated_colors[0][0] = 45.0;
+  generated_colors[0][1] = 45.0;
+  generated_colors[0][2] = 45.0;
+  generated_colors[0][3] = 45.0;
 
-  // Set modes for multiplexer input and select pins
-  pinMode(INPUTPIN, INPUT);
-  pinMode(SP0, OUTPUT);
-  pinMode(SP1, OUTPUT);
-  pinMode(SP2, OUTPUT);
-  pinMode(SP3, OUTPUT);
-  // Set the output pins to LOW. Might not be needed, but won't do
-  // any harm either.
-  digitalWrite(SP0, LOW);
-  digitalWrite(SP1, LOW);
-  digitalWrite(SP2, LOW);
-  digitalWrite(SP3, LOW);
+  generated_colors[7][0] = 0.0;
+  generated_colors[7][1] = 11.0;
+  generated_colors[7][2] = 91.0;
+  generated_colors[7][3] = 10.0;
+
+  Serial.begin(115200);
 
   // Pump relays are active low so bring them HIGH to set to
   // their off position.
-  for(int i=0;i<8;i++){
-    pinMode(tubePins[i], OUTPUT);
-    digitalWrite(tubePins[i], HIGH);
+  for(int i=0;i<10;i++){
+    pinMode(relay_pins[i], OUTPUT);
+    digitalWrite(relay_pins[i], HIGH);
   }
 
-  // Run some sort of initialization function to fill the
-  // tubes with pigments.
-  initialize(); 
-}
+  // Set all potentiometer readings to 0
+  for(int i=0;i<4;i++){
+    for(int k=0;k<10;k++){
+      pot_readings[i][k] = 0;
+    } 
+  }
+
+  // run the print_button_pressed when the print button is RELEASED
+  attachInterrupt(0, print_button_pressed, FALLING); 
+ }
 
 //==============================================================
 // Main loop
 //==============================================================
 void loop(){
-  handle_input();
-  handle_serial();
-  checkTimers();
-//  calculate_color_rows();
+    // Wait for all the switches to go OFF before going to the next phase
+  if(printer_state == 0){
+    int switches_on = 0;
+    for(int i=0;i<8;i++){
+      switches_on += digitalRead(switch_pins[i]);
+    }
+    if(switches_on == 0){
+       printer_state = 1;
+    }
+    // Turn on pumps when switches are set to ON
+  }else if(printer_state == 1){
+    for(int i=0;i<8;i++){
+      if(digitalRead(switch_pins[i]) == HIGH){
+        digitalWrite(relay_pins[i], LOW);
+      }else{
+        digitalWrite(relay_pins[i], HIGH);      
+      }
+    }
+  // Regular print mode
+  }else if(printer_state == 2){
+
+  }
+
+  handle_input(); // Check switch / potmeter states
+  handle_serial(); // Check if Serial commands came in
+  check_timers();  // Check is running timers have expired
 }
 
+//==============================================================
+// Check and handle changes in switch/pot positions
+//==============================================================
 void handle_input(){
-    // Check current values of inputs (pots, sliders, switches)
-  for(index=0;index<=14;index++){
-    // Send 4 bits to select pins on multiplexer to select which
-    // pin to read from. Convert the index value to these 4 bits:
-    // 0 = 0000, 1 = 0001, 2 = 0010, etc...
-    digitalWrite(SP0, bitRead(index, 0));
-    digitalWrite(SP1, bitRead(index, 1));
-    digitalWrite(SP2, bitRead(index, 2));
-    digitalWrite(SP3, bitRead(index, 3));
+  // Check the switch states
+  for(int i=0;i<10;i++){
+    switch_states[i] = digitalRead(switch_pins[i]);
+  }
 
-    // Listen to input
-    if (index < 10){ // switches
-      cup_enabled[index] = digitalRead(INPUTPIN);
-    }
-    else{ // potmeters
-      // handle potmeters
+  // Check the potentiometers. An average will be calculated
+  boolean pot_values_changed = false;
+  for(int i=0;i<4;i++){
+    pot_total[i] = pot_total[i] - pot_readings[i][pot_index];         
+    pot_readings[i][pot_index] = analogRead(pot_pins[i]); 
+    pot_total[i]= pot_total[i] + pot_readings[i][pot_index];       
+
+    int old_average = pot_average[i];
+    pot_average[i] = pot_total[i] / POT_SAMPLE_AMOUNT;         
+    if(old_average != pot_average[i]){
+      pot_values_changed = true;
     }
   }
-  // Update the color rows (do every loop so you can adjust values while printing)
+  pot_index++;
+  if (pot_index >= POT_SAMPLE_AMOUNT){
+    pot_index = 0;
+  }    
+  // Only update the colors if pot values actually changed
+  if(pot_values_changed){
+    calculate_colors(pot_average);
+  }
 }
 
 void handle_serial(){
   if(Serial.available() > 0){
-    char input = Serial.read();
-    if(input == '0'){
-      topping_fluid_number = 0; 
-    }
-    else if(input == '1'){
-      topping_fluid_number = 1; 
-    }
-    else if(input == '2'){
-      topping_fluid_number = 2; 
-    }
-    else if(input == '3'){
-      topping_fluid_number = 3; 
-    }else if(input == '4'){
-  calculate_color_rows();
-      
-    }
-    dispense_button_pressed();
+    int input = Serial.read() - '0'; // Convert ASCI code to number
+    // Do stuff when needed
   }
 }
 
 //==============================================================
 // Executed when print button is pressed
 //==============================================================
-void dispense_button_pressed(){
-  if(can_dispend && button_blocked_timer == 0){
-    dispend(current_cup_index);
-    if(current_cup_index < 7){
-      for(int i=current_cup_index+1; i<8; i++){
-        if(cup_enabled[current_cup_index]){
-          current_cup_index = i;
-          break;
-        }
+void print_button_pressed(){
+  if(button_block_timer == 0){
+    // Turn on / off pumps based on switches 1 - 8
+    if(printer_state == 1){
+      int switches_on = 0;
+      for(int i=0;i<8;i++){
+        switches_on = digitalRead(switch_pins[i]);
       }
-    }
-    else{
-      can_dispend = false;
+      if(switches_on == 0){
+        printer_state = 2;
+      }
+    }else if(printer_state == 2){
+      dispend(cup_index);
+      if(cup_index < 10){
+        for(int i=cup_index+1;i<10;i++){
+          if(digitalRead(switch_pins[i]) == HIGH){
+            cup_index = i;
+            break;
+          }
+        }
+        // If this part gets reached, all selected cups are filles
+        // Block the button for a while
+        button_block_timer = millis() + (BUTTON_BLOCK_PERIOD * 2);
+      }
     }
   }
 }
@@ -162,45 +197,37 @@ void dispense_button_pressed(){
 //==============================================================
 // Check if any of the timers have expired
 //==============================================================
-void checkTimers (){
+void check_timers (){
 
   // Pump timers
-  for(uint8_t index=0;index<8;index++){
-    if(timers[index] != 0){
-      if(timers[index] < millis()){
-        digitalWrite(tubePins[index], HIGH);
-        timers[index] = 0;
+  for(uint8_t i=0;i<8;i++){
+    if(timers[i] != 0){
+      if(timers[i] < millis()){
+        digitalWrite(relay_pins[i], HIGH);
+        timers[i] = 0;
       }
     }
   }
 
   // Button block timer (blocks for a while after pressing)
-  if(button_blocked_timer > 0){
-    if(button_blocked_timer < millis()){
-      button_blocked_timer = 0;
+  if(button_block_timer > 0){
+    if(button_block_timer < millis()){
+      button_block_timer = 0;
     } 
   }
-
-  // Check if need to add topping fluid
-  if(topping_fluid_timer > 0){
-    if(topping_fluid_timer < millis()){
-      triggerTubePin(4+topping_fluid_number, topping_fluid_time);
-      topping_fluid_timer = 0;
-    } 
-  }
-
 }
 
 //==============================================================
 // Open the right tubes
 //==============================================================
 void dispend(const int index){
+  /*
   float period = -1.0;
   float longest_period = 0.0; // 
   float total_period = 0.0; // used in calculating topping fluids
-
+  
   if(color_C[index] != 0){
-    triggerTubePin(0, color_C[index] * PIGMENT_PUMP_TIME_FACTOR);
+    run_pump(0, color_C[index] * PIGMENT_PUMP_TIME_FACTOR);
     period = color_C[index] * PIGMENT_PUMP_TIME_FACTOR;
     total_period += period;
     if(period > longest_period){
@@ -208,7 +235,7 @@ void dispend(const int index){
     }
   }
   if(color_M[index] != 0){
-    triggerTubePin(1, color_M[index] * PIGMENT_PUMP_TIME_FACTOR);
+    run_pump(1, color_M[index] * PIGMENT_PUMP_TIME_FACTOR);
     period = color_M[index] * PIGMENT_PUMP_TIME_FACTOR;
     total_period += period;
     if(period > longest_period){
@@ -216,7 +243,7 @@ void dispend(const int index){
     }
   }
   if(color_Y[index] != 0){
-    triggerTubePin(2, color_Y[index] * PIGMENT_PUMP_TIME_FACTOR);
+    run_pump(2, color_Y[index] * PIGMENT_PUMP_TIME_FACTOR);
     period = color_Y[index] * PIGMENT_PUMP_TIME_FACTOR;
     total_period += period;
     if(period > longest_period){
@@ -224,7 +251,7 @@ void dispend(const int index){
     }
   }
   if(color_K[index] != 0){
-    triggerTubePin(3, color_K[index] * PIGMENT_PUMP_TIME_FACTOR);
+    run_pump(3, color_K[index] * PIGMENT_PUMP_TIME_FACTOR);
     period = color_K[index] * PIGMENT_PUMP_TIME_FACTOR;
     total_period += period;
     if(period > longest_period){
@@ -249,26 +276,18 @@ void dispend(const int index){
   // last CMYK tube is closed
   
   // Block the button for two seconds to prevent double-pouring
-  button_blocked_timer = millis() + BUTTON_BLOCK_TIME;
+  button_block_timer = millis() + BUTTON_BLOCK_TIME;
+  */
 }
 
 //==============================================================
 // Trigger a pin (run a pump)
 //==============================================================
-void triggerTubePin(const int index, const int time){
-  if(index < 8){ // 8 Tube pins 
+void run_pump(const int index, const int time_to_run){
+  if(index < 8){ // make sure the index is valid
     if(timers[index] == 0){
-      timers[index] = millis()+time;
-      digitalWrite(tubePins[index], LOW);
+      timers[index] = millis()+time_to_run;
+      digitalWrite(relay_pins[index], LOW);
     }    
   }
-}
-
-//==============================================================
-// Initialize the printer
-// Runs all of the pumps for 5 seconds
-//==============================================================
-void initialize(){
-  // Some initialization, like running the pumps long enough 
-  // to fill the tubes
 }

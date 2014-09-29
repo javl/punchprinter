@@ -1,53 +1,35 @@
-void calculate_color_rows(){
+void calculate_colors(const int pot_data[4]){
 
-  float total_change_C = (generated_colors[7][1] - generated_colors[0][1]) / (NUMBER_OF_GLASSES - 1);
-  float total_change_M = (generated_colors[7][2] - generated_colors[0][2]) / (NUMBER_OF_GLASSES - 1);
-  float total_change_Y = (generated_colors[7][3] - generated_colors[0][3]) / (NUMBER_OF_GLASSES - 1);
-  float total_change_K = (generated_colors[7][4] - generated_colors[0][4]) / (NUMBER_OF_GLASSES - 1);
+  // new_colors[0] = left brightness
+  // new_colors[1] = right brightness
+  // new_colors[2] = right hue
+  // new_colors[3] = left hue
 
+  HSVtoRGBtoCMYK(0, map(pot_data[3], 0, 1023, 0, 360), 100, map(pot_data[0], 0, 1023, 0, 100));
+  HSVtoRGBtoCMYK(NUMBER_OF_GLASSES-1, map(pot_data[2], 0, 1023, 0, 360), 100, map(pot_data[1], 0, 1023, 0, 100));
+
+  // Get change per glass for each color: (last color - first color) / (number of glasses - 1)
+  float change_per_glass_C = (generated_colors[7][1] - generated_colors[0][1]) / (NUMBER_OF_GLASSES - 1);
+  float change_per_glass_M = (generated_colors[7][2] - generated_colors[0][2]) / (NUMBER_OF_GLASSES - 1);
+  float change_per_glass_Y = (generated_colors[7][3] - generated_colors[0][3]) / (NUMBER_OF_GLASSES - 1);
+  float change_per_glass_K = (generated_colors[7][4] - generated_colors[0][4]) / (NUMBER_OF_GLASSES - 1);
+
+  // Set all the seperate glass values (begincolor + n*change_per_glass
   for(int i=1; i < NUMBER_OF_GLASSES -1; i++){
-    generated_colors[i][0] = round(generated_colors[i-1][0] + total_change_C);
-    generated_colors[i][1] = round(generated_colors[i-1][1] + total_change_M);
-    generated_colors[i][2] = round(generated_colors[i-1][2] + total_change_Y);
-    generated_colors[i][3] = round(generated_colors[i-1][3] + total_change_K);
+    generated_colors[i][0] = round(generated_colors[i-1][0] + change_per_glass_C);
+    generated_colors[i][1] = round(generated_colors[i-1][1] + change_per_glass_M);
+    generated_colors[i][2] = round(generated_colors[i-1][2] + change_per_glass_Y);
+    generated_colors[i][3] = round(generated_colors[i-1][3] + change_per_glass_K);
   }
-
-Serial.print("C: ");
-  for(int i=0;i<10;i++){
-    Serial.print(generated_colors[i][1]);
-    Serial.print(",\t");
-  }
-  Serial.println("");
-  Serial.print("M: ");
-  for(int i=0;i<10;i++){
-    Serial.print(color_M[i]);
-    Serial.print(",\t");
-  }
-  Serial.println("");
-  Serial.print("Y: ");
-  for(int i=0;i<10;i++){
-    Serial.print(color_Y[i]);
-    Serial.print(",\t");
-  }
-  Serial.println("");
-  Serial.print("K: ");
-  for(int i=0;i<10;i++){
-    Serial.print(color_K[i]);
-    Serial.print(",\t");
-  }
-  
 }
 
 
-void HSVtoRGBtoCMYK(const float h, const float s, const float v) {
+void HSVtoRGBtoCMYK(int store_in_index, float h, float s, float v) {
   // FIRST PART, HSV to RGB
-  h /= 360;
-  s /= 100;
-  v /= 100;
+  h /= 360.0;
+  s /= 100.0;
+  v /= 100.0;
 
-  //h /= 559;
-  //s /= 559;
-  //v /= 559;
   int i;
   float f, p, q, t;
   float r = 0;
@@ -98,33 +80,29 @@ void HSVtoRGBtoCMYK(const float h, const float s, const float v) {
 
   // SECOND PART, RGB to CMYK
 
-  float color_C = 0;
-  float color_M = 0;
-  float color_Y = 0;
-  float color_K = 0;  
-
   // BLACK
   if (r==0 && g==0 && b==0) {
-    color_K = 1;
-    //float[] output = {
-    //  0, 0, 0, 1
-    //};
-    Serial.print("Just black");
-    //return output;
+    generated_colors[store_in_index][0] = 0;
+    generated_colors[store_in_index][1] = 0;
+    generated_colors[store_in_index][2] = 0;
+    generated_colors[store_in_index][3] = 100;
+    return;
   }
 
-  color_C = 1 - (r/255);
-  color_M = 1 - (g/255);
-  color_Y = 1 - (b/255);
-
+  float color_C = 1 - (r/255);
+  float color_M = 1 - (g/255);
+  float color_Y = 1 - (b/255);
+ 
   float minCMY = min(color_C, min(color_M, color_Y));
   color_C = (color_C - minCMY) / (1 - minCMY) ;
   color_M = (color_M - minCMY) / (1 - minCMY) ;
   color_Y = (color_Y - minCMY) / (1 - minCMY) ;
-  color_K = minCMY;
-  
-  color_C = max(0, floor(color_C * 100));
-  color_M = max(0, floor(color_M * 100));
-  color_Y = max(0, floor(color_Y * 100));
-  color_K = max(0, floor(color_K * 100));
+  float color_K = minCMY;
+
+  generated_colors[store_in_index][0] = max(0, floor(color_C * 100));
+  generated_colors[store_in_index][1] = max(0, floor(color_M * 100));
+  generated_colors[store_in_index][2] = max(0, floor(color_Y * 100));
+  generated_colors[store_in_index][3] = max(0, floor(color_K * 100));
+
 }
+
