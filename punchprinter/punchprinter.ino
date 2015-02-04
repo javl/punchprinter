@@ -16,7 +16,7 @@
 
 // The potentiometer values are checked multiple times and an average of the measured
 // values is used to smooth the results. This sets the sample amount:
-//#define POT_SAMPLE_AMOUNT 10
+#define POT_SAMPLE_AMOUNT 10
 
 // Topping mode:
 // 1: do pigments, when done add topping
@@ -48,10 +48,10 @@ int pot_pins[4] = {
 int button_pin = 18; // Print button, 21 because it can use interrupts
 boolean print_button_is_available = true;
 
-//int pot_readings[4][POT_SAMPLE_AMOUNT]; // the readings from the pots
-//int pot_index = 0; // the index of the current potreading
-//int pot_total[4] = {
-//  0, 0, 0, 0}; // the running total for the pots
+int pot_mins[4] = { 
+  1023, 1023, 1023, 1023 }; // Will hold the minimum value of each pot
+int pot_maxs[4] = { 
+  0, 0, 0, 0 }; // will hold the maximum value of each pot
 int pot_readings[4] = {
   0, 0, 0, 0}; // Holds the final averaged pot values, used for colors
 
@@ -79,20 +79,14 @@ void setup(){
   for(int i=0;i<10;i++){
     pinMode(switch_pins[i], INPUT);
   }
-  pinMode(button_pin, INPUT);
+  //pinMode(button_pin, OUTPUT);
+  pinMode(button_pin, INPUT_PULLUP);
 
 
   for(int i=0;i<8;i++){
     pinMode(relay_pins[i], OUTPUT);
     digitalWrite(relay_pins[i], HIGH);
   }
-
-  // Set all potentiometer readings to 0
-  //  for(int i=0;i<4;i++){
-  //    for(int k=0;k<10;k++){
-  //      pot_readings[i][k] = 0;
-  //    } 
-  //  }
 
 }
 
@@ -104,19 +98,21 @@ void loop(){
   // anything until all of the switches are set to their OFF positions
   // When this happens, it changes to printer_state 1
   if(button_block_timer == 0){
-    if(digitalRead(button_pin) == 1){
+    if(digitalRead(button_pin) == 0){
       // used to make sure a button needs to be depressed before recognizing it again
       if(print_button_is_available){ 
         print_button_is_available = false;
         print_button_pressed(); 
-      }else{
+      }
+      else{
         print_button_is_available = true; 
       }
     }
-  }else{
-   print_button_is_available = false; 
   }
-
+  else{
+    print_button_is_available = false; 
+  }
+  // 0: just plugged in, waiting for all switches to go LOW
   if(printer_state == 0){
     int switches_on = 0;
     for(int i=0;i<10;i++){
@@ -127,10 +123,12 @@ void loop(){
     if(switches_on == 0){
       ////Serial.println("Switching to printer_state 1");
       printer_state = 1;
+      // 1: all switches are low, toggle 0 to 7 to run the pumps
     }
 
     // Turn on pumps when switches are set to ON
   }
+  // 1: all switches are low, toggle 0 to 7 to run the pumps
   else if(printer_state == 1){
     for(int i=0;i<8;i++){ // Check 8 pins (not 10) because there are 8 pumps
       if(digitalRead(switch_pins[i]) == HIGH){
@@ -142,6 +140,7 @@ void loop(){
     }
     // Regular print mode
   }
+  // 2: normal print mode!
   else if(printer_state == 2){
     // Don't do anything. Input is checked every second using check_input_timer
   }
@@ -157,11 +156,22 @@ void handle_input(){
   for(int i=0;i<10;i++){
     switch_states[i] = digitalRead(switch_pins[i]);
   }
-
-  pot_readings[0] = max(0, 1023-analogRead(pot_pins[0])); // invert
-  pot_readings[1] = max(0, 1023-analogRead(pot_pins[1])); // invert
-  pot_readings[2] = analogRead(pot_pins[2]);
-  pot_readings[3] = analogRead(pot_pins[3]);
+  int pot_average;
+  for(int i=0;i<4;i++){
+    pot_average = 0;
+    for(int k=0;k<POT_SAMPLE_AMOUNT;k++){
+      pot_average += analogRead(pot_pins[i]);
+    } 
+    pot_readings[i] = round(pot_average / POT_SAMPLE_AMOUNT);
+    if(pot_readings[i] > pot_maxs[i]) pot_maxs[i] = pot_readings[i];
+    if(pot_readings[i] < pot_mins[i]) pot_mins[i] = pot_readings[i];
+    pot_readings[i] = map(pot_readings[i], pot_mins[i], pot_maxs[i], 0, 1023);
+  }
+   // De oude versie draaide de waarde van de pot sliders om
+  //pot_readings[0] = max(0, 1023-analogRead(pot_pins[0])); // invert
+  //pot_readings[1] = max(0, 1023-analogRead(pot_pins[1])); // invert
+  //pot_readings[2] = analogRead(pot_pins[2]);
+  //pot_readings[3] = analogRead(pot_pins[3]);
 
   calculate_colors(pot_readings);
 
@@ -223,7 +233,8 @@ void handle_serial(){
 //==============================================================
 void print_button_pressed(){
   if(button_block_timer == 0){ // First check if button is enabled
-    if(printer_state == 1){ // In pump test mode. Use switches to turn
+    // 1: all switches are low, toggle 0 to 7 to run the pumps
+    if(printer_state == 1){
       // on the pumps. Press the print button to go to print mode
       int switches_on = 0;
       for(int i=0;i<10;i++){
@@ -233,11 +244,13 @@ void print_button_pressed(){
       }
       if(switches_on == 0){
         ////Serial.println("Switching to printer_state 2");
+        // 2: normal print mode!
         printer_state = 2;
         check_input_timer = millis() + 1000;      
       }
     }
-    else if(printer_state == 2){ // Normal print mode
+    // 2: normal print mode!
+    else if(printer_state == 2){
       int total_on = 0;
       for(int i=0; i<10;i++){
         if(digitalRead(switch_pins[i]) == 1){
@@ -323,7 +336,7 @@ void check_timers (){
       }
     }
   }
-
+  // 2: normal print mode!
   if(printer_state == 2){
     if(check_input_timer < millis()){
       handle_input();
@@ -391,6 +404,9 @@ void run_pump(const int index, const int time_to_run){
     }    
   }
 }
+
+
+
 
 
 
